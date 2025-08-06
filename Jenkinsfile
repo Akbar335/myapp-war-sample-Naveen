@@ -2,84 +2,96 @@ pipeline {
     agent any
 
     environment {
-        WAR_NAME = "myapp.war"
-        BUILD_DIR = "target"
-        DEPLOY_DIR = "tomcat/webapps"
-        BACKUP_DIR = "rollback"
+        TOMCAT_WEBAPPS = 'C:\\Tomcat\\webapps'
+        BACKUP_DIR = 'C:\\Tomcat\\backup'
+        WAR_FILE = 'target\\myapp.war'
+        DEPLOY_DIR = "${TOMCAT_WEBAPPS}\\myapp.war"
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/korupon/myapp-war-sample.git'
+            }
+        }
+
         stage('Build WAR') {
             steps {
-                echo "Building WAR using Maven"
-                sh 'mvn clean package'
+                bat 'mvn clean package'
             }
         }
 
-        stage('Backup Last WAR') {
+        stage('Backup & Deploy Locally') {
             steps {
                 script {
-                    sh '''
-                        mkdir -p ${BACKUP_DIR}
-                        if [ -f ${DEPLOY_DIR}/${WAR_NAME} ]; then
-                            echo "Backing up current WAR"
-                            cp ${DEPLOY_DIR}/${WAR_NAME} ${BACKUP_DIR}/${WAR_NAME}.bak
-                        else
-                            echo "No WAR to backup"
-                        fi
-                    '''
-                }
-            }
-        }
+                    def timestamp = new Date().format("yyyyMMdd_HHmmss")
+                    def backupFile = "${BACKUP_DIR}\\myapp_${timestamp}.war"
 
-        stage('Deploy WAR') {
-            steps {
-                echo "Deploying WAR to local Tomcat"
-                sh '''
-                    mkdir -p ${DEPLOY_DIR}
-                    cp ${BUILD_DIR}/${WAR_NAME} ${DEPLOY_DIR}/
-                    echo "Deployment complete"
-                '''
+                    bat """
+                    if not exist "${BACKUP_DIR}" mkdir "${BACKUP_DIR}"
+                    if exist "${DEPLOY_DIR}" (
+                        copy /Y "${DEPLOY_DIR}" "${backupFile}"
+                        del /Q "${DEPLOY_DIR}"
+                    )
+                    copy /Y "${WAR_FILE}" "${DEPLOY_DIR}"
+                    """
+                }
             }
         }
 
         stage('Restart Tomcat') {
             steps {
-                echo "Simulating Tomcat restart"
-                sh '''
-                    echo "Stopping Tomcat..."
-                    sleep 2
-                    echo "Starting Tomcat..."
-                    sleep 2
-                '''
+                bat 'net stop Tomcat9'
+                sleep time: 5, unit: 'SECONDS'
+                bat 'net start Tomcat9'
             }
         }
 
         stage('Smoke Test') {
             steps {
-                echo "Running smoke test"
-                // Simulate failure for testing rollback
-                sh 'exit 1'  // <-- Change to 0 for success
+                script {
+                    def response = bat(script: 'curl -s -o nul -w "%%{http_code}" http://localhost:8080/myapp/', returnStdout: true).trim()
+                    if (response != "200") {
+                        error "Smoke test failed with HTTP $response"
+                    } else {
+                        echo "✅ Smoke test passed: HTTP $response"
+                    }
+                }
             }
         }
     }
 
     post {
-        failure {
-            echo "Deployment failed! Starting rollback..."
-            sh '''
-                if [ -f ${BACKUP_DIR}/${WAR_NAME}.bak ]; then
-                    echo "Restoring backup WAR..."
-                    cp ${BACKUP_DIR}/${WAR_NAME}.bak ${DEPLOY_DIR}/${WAR_NAME}
-                    echo "Rollback complete. Restarting Tomcat..."
-                    sleep 2
-                else
-                    echo "No backup WAR found. Cannot rollback!"
-                fi
-            '''
-        }
         success {
-            echo "Pipeline completed successfully!"
+            emailext(
+                to: 'devops-team@example.com',
+                subject: "✅ Local Deployment Successful: myapp.war",
+                body: "Deployment to local Tomcat succeeded on Windows."
+            )
+        }
+
+        failure {
+            script {
+                echo '❌ Deployment failed. Attempting rollback...'
+                bat """
+                set ROLLBACK_FILE=
+                for /f %%F in ('dir /b /o-d "${BACKUP_DIR}\\myapp_*.war"') do (
+                    set ROLLBACK_FILE=%%F
+                    goto done
+                )
+                :done
+                if defined ROLLBACK_FILE (
+                    copy /Y "${BACKUP_DIR}\\%ROLLBACK_FILE%" "${DEPLOY_DIR}"
+                    net stop Tomcat9
+                    net start Tomcat9
+                )
+                """
+            }
+            emailext(
+                to: 'devops-team@example.com',
+                subject: "❌ Local Deployment Failed: myapp.war",
+                body: "Deployment or smoke test failed. Rollback attempted."
+            )
         }
     }
 }
