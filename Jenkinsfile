@@ -2,77 +2,84 @@ pipeline {
     agent any
 
     environment {
-        DEPLOY_USER = credentials('tomcat-ssh-user')     // SSH Username + Password or SSH Key in Jenkins Credentials
-        DEPLOY_HOST = '192.168.1.100'
-        REMOTE_TOMCAT = '/opt/tomcat/webapps'
-        BACKUP_DIR = '/opt/tomcat/backup'
-        WAR_FILE = 'target\\myapp.war'
+        WAR_NAME = "myapp.war"
+        BUILD_DIR = "target"
+        DEPLOY_DIR = "tomcat/webapps"
+        BACKUP_DIR = "rollback"
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/korupon/myapp-war-sample.git'
-            }
-        }
-
         stage('Build WAR') {
             steps {
-                bat 'mvn clean package'
+                echo "Building WAR using Maven"
+                sh 'mvn clean package'
             }
         }
 
-        stage('Deploy to Remote Linux Tomcat') {
+        stage('Backup Last WAR') {
             steps {
                 script {
-                    def deployScript = """
-                        ssh %DEPLOY_USER%@%DEPLOY_HOST% "
-                            mkdir -p %BACKUP_DIR% &&
-                            if [ -f %REMOTE_TOMCAT%/myapp.war ]; then
-                                cp %REMOTE_TOMCAT%/myapp.war %BACKUP_DIR%/myapp_\$(date +%F_%T).war;
-                            fi &&
-                            rm -rf %REMOTE_TOMCAT%/myapp
-                        "
-                        scp %WAR_FILE% %DEPLOY_USER%@%DEPLOY_HOST%:%REMOTE_TOMCAT%/myapp.war
-                        ssh %DEPLOY_USER%@%DEPLOY_HOST% "systemctl restart tomcat"
-                    """
-                    bat label: 'Deploy WAR via SSH', script: deployScript
+                    sh '''
+                        mkdir -p ${BACKUP_DIR}
+                        if [ -f ${DEPLOY_DIR}/${WAR_NAME} ]; then
+                            echo "Backing up current WAR"
+                            cp ${DEPLOY_DIR}/${WAR_NAME} ${BACKUP_DIR}/${WAR_NAME}.bak
+                        else
+                            echo "No WAR to backup"
+                        fi
+                    '''
                 }
+            }
+        }
+
+        stage('Deploy WAR') {
+            steps {
+                echo "Deploying WAR to local Tomcat"
+                sh '''
+                    mkdir -p ${DEPLOY_DIR}
+                    cp ${BUILD_DIR}/${WAR_NAME} ${DEPLOY_DIR}/
+                    echo "Deployment complete"
+                '''
+            }
+        }
+
+        stage('Restart Tomcat') {
+            steps {
+                echo "Simulating Tomcat restart"
+                sh '''
+                    echo "Stopping Tomcat..."
+                    sleep 2
+                    echo "Starting Tomcat..."
+                    sleep 2
+                '''
             }
         }
 
         stage('Smoke Test') {
             steps {
-                script {
-                    def response = bat(script: "curl -s -o nul -w \"%%{http_code}\" http://%DEPLOY_HOST%:8080/myapp/", returnStdout: true).trim()
-                    if (response != "200") {
-                        error "Smoke test failed with HTTP $response"
-                    } else {
-                        echo "✅ Smoke test passed: HTTP $response"
-                    }
-                }
+                echo "Running smoke test"
+                // Simulate failure for testing rollback
+                sh 'exit 1'  // <-- Change to 0 for success
             }
         }
     }
 
     post {
-        success {
-            emailext(
-                to: 'devops-team@example.com',
-                subject: "✅ Deployment Successful: myapp.war",
-                body: "The deployment to Tomcat at ${DEPLOY_HOST} was successful."
-            )
-        }
         failure {
-            script {
-                echo 'Deployment failed. Attempting rollback...'
-                bat "ssh %DEPLOY_USER%@%DEPLOY_HOST% '~/rollback.sh'"
-            }
-            emailext(
-                to: 'devops-team@example.com',
-                subject: "❌ Deployment Failed: myapp.war",
-                body: "Deployment or smoke test failed. Rollback attempted on ${DEPLOY_HOST}."
-            )
+            echo "Deployment failed! Starting rollback..."
+            sh '''
+                if [ -f ${BACKUP_DIR}/${WAR_NAME}.bak ]; then
+                    echo "Restoring backup WAR..."
+                    cp ${BACKUP_DIR}/${WAR_NAME}.bak ${DEPLOY_DIR}/${WAR_NAME}
+                    echo "Rollback complete. Restarting Tomcat..."
+                    sleep 2
+                else
+                    echo "No backup WAR found. Cannot rollback!"
+                fi
+            '''
+        }
+        success {
+            echo "Pipeline completed successfully!"
         }
     }
 }
