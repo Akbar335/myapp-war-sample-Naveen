@@ -2,59 +2,52 @@ pipeline {
     agent any
 
     environment {
-        TOMCAT_WEBAPPS = 'C:\\Tomcat\\webapps'
-        BACKUP_DIR = 'C:\\Tomcat\\backup'
-        WAR_FILE = 'target\\myapp.war'
-        DEPLOY_DIR = "${TOMCAT_WEBAPPS}\\myapp.war"
+        DEPLOY_DIR = 'C:\\Tomcat\\webapps\\myapp.war'
+        BACKUP_DIR = 'C:\\Tomcat\\rollback'
+        WORKSPACE = "${env.WORKSPACE}"
+        WAR_FILE = "${env.WORKSPACE}\\target\\myapp.war"
+        SMTP_FAILURE_EMAIL = 'admin@example.com' // Replace with your actual email
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/korupon/myapp-war-sample.git'
-            }
-        }
-
         stage('Build WAR') {
             steps {
+                echo "Building WAR file..."
                 bat 'mvn clean package'
             }
         }
 
-        stage('Backup & Deploy Locally') {
+        stage('Backup Existing WAR') {
             steps {
-                script {
-                    def timestamp = new Date().format("yyyyMMdd_HHmmss")
-                    def backupFile = "${BACKUP_DIR}\\myapp_${timestamp}.war"
-
-                    bat """
+                echo "Backing up current deployed WAR..."
+                bat """
+                if exist "${DEPLOY_DIR}" (
                     if not exist "${BACKUP_DIR}" mkdir "${BACKUP_DIR}"
-                    if exist "${DEPLOY_DIR}" (
-                        copy /Y "${DEPLOY_DIR}" "${backupFile}"
-                        del /Q "${DEPLOY_DIR}"
-                    )
-                    copy /Y "${WAR_FILE}" "${DEPLOY_DIR}"
-                    """
-                }
+                    copy /Y "${DEPLOY_DIR}" "${BACKUP_DIR}\\myapp_%DATE:~10,4%-%DATE:~4,2%-%DATE:~7,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%.war"
+                )
+                """
             }
         }
 
-        stage('Restart Tomcat') {
+        stage('Deploy to Tomcat') {
             steps {
-                bat 'net stop Tomcat9'
-                sleep time: 5, unit: 'SECONDS'
-                bat 'net start Tomcat9'
+                echo "Deploying WAR to Tomcat..."
+                bat """
+                copy /Y "${WAR_FILE}" "${DEPLOY_DIR}"
+                net stop Tomcat9
+                net start Tomcat9
+                """
             }
         }
 
         stage('Smoke Test') {
             steps {
+                echo "Running smoke test..."
+                sleep time: 10, unit: 'SECONDS'
                 script {
-                    def response = bat(script: 'curl -s -o nul -w "%%{http_code}" http://localhost:8080/myapp/', returnStdout: true).trim()
-                    if (response != "200") {
-                        error "Smoke test failed with HTTP $response"
-                    } else {
-                        echo "✅ Smoke test passed: HTTP $response"
+                    def response = bat(script: 'powershell -Command "(Invoke-WebRequest http://localhost:8080/myapp/ -UseBasicParsing).StatusCode"', returnStdout: true).trim()
+                    if (response != '200') {
+                        error "Smoke test failed! Status code: ${response}"
                     }
                 }
             }
@@ -63,35 +56,35 @@ pipeline {
 
     post {
         success {
-            emailext(
-                to: 'devops-team@example.com',
-                subject: "✅ Local Deployment Successful: myapp.war",
-                body: "Deployment to local Tomcat succeeded on Windows."
-            )
+            echo "✅ Deployment succeeded!"
+            // Optional email on success
+            // mail to: "${SMTP_FAILURE_EMAIL}",
+            //      subject: "Jenkins Job SUCCESS: ${env.JOB_NAME}",
+            //      body: "The deployment was successful."
         }
 
         failure {
-            script {
-                echo '❌ Deployment failed. Attempting rollback...'
-                bat """
-                set ROLLBACK_FILE=
-                for /f %%F in ('dir /b /o-d "${BACKUP_DIR}\\myapp_*.war"') do (
-                    set ROLLBACK_FILE=%%F
-                    goto done
-                )
-                :done
-                if defined ROLLBACK_FILE (
-                    copy /Y "${BACKUP_DIR}\\%ROLLBACK_FILE%" "${DEPLOY_DIR}"
-                    net stop Tomcat9
-                    net start Tomcat9
-                )
-                """
-            }
-            emailext(
-                to: 'devops-team@example.com',
-                subject: "❌ Local Deployment Failed: myapp.war",
-                body: "Deployment or smoke test failed. Rollback attempted."
+            echo "❌ Deployment failed. Rolling back..."
+
+            bat """
+            setlocal ENABLEDELAYEDEXPANSION
+            set "ROLLBACK_FILE="
+            for /f %%F in ('dir /b /o-d "${BACKUP_DIR}\\myapp_*.war"') do (
+                set "ROLLBACK_FILE=%%F"
+                goto done
             )
+            :done
+            if defined ROLLBACK_FILE (
+                copy /Y "${BACKUP_DIR}\\!ROLLBACK_FILE!" "${DEPLOY_DIR}"
+                net stop Tomcat9
+                net start Tomcat9
+            )
+            """
+
+            // Optional failure notification
+            // mail to: "${SMTP_FAILURE_EMAIL}",
+            //      subject: "Jenkins Job FAILED: ${env.JOB_NAME}",
+            //      body: "The deployment failed and rollback was triggered."
         }
     }
 }
