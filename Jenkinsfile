@@ -45,9 +45,13 @@ pipeline {
                 echo "Running smoke test..."
                 sleep time: 10, unit: 'SECONDS'
                 script {
-                    def response = bat(script: 'powershell -Command "(Invoke-WebRequest http://localhost:9090/myapp/ -UseBasicParsing).StatusCode"', returnStdout: true).trim()
-                    if (response != '200') {
-                        error "Smoke test failed! Status code: ${response}"
+                    def statusCode = bat(
+                        script: 'powershell -Command "(Invoke-WebRequest http://localhost:9090/myapp/ -UseBasicParsing).StatusCode"',
+                        returnStdout: true
+                    ).trim()
+                    echo "Smoke test returned status code: ${statusCode}"
+                    if (statusCode != "200") {
+                        error("Smoke test failed! Status code: ${statusCode}")
                     }
                 }
             }
@@ -57,7 +61,7 @@ pipeline {
     post {
         success {
             echo "✅ Deployment succeeded!"
-            // Optional email on success
+            // Optional: notify on success
             // mail to: "${SMTP_FAILURE_EMAIL}",
             //      subject: "Jenkins Job SUCCESS: ${env.JOB_NAME}",
             //      body: "The deployment was successful."
@@ -81,7 +85,7 @@ pipeline {
             )
             """
 
-            // Optional failure notification
+            // Optional: notify on failure
             // mail to: "${SMTP_FAILURE_EMAIL}",
             //      subject: "Jenkins Job FAILED: ${env.JOB_NAME}",
             //      body: "The deployment failed and rollback was triggered."
