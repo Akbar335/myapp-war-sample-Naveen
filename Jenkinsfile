@@ -45,10 +45,12 @@ pipeline {
                 echo "Running smoke test..."
                 sleep time: 10, unit: 'SECONDS'
                 script {
-                    def statusCode = bat(
+                    def rawOutput = bat(
                         script: 'powershell -Command "(Invoke-WebRequest http://localhost:9090/myapp/ -UseBasicParsing).StatusCode"',
                         returnStdout: true
-                    ).trim()
+                    )
+                    def lines = rawOutput.readLines()
+                    def statusCode = lines.last().trim()
                     echo "Smoke test returned status code: ${statusCode}"
                     if (statusCode != "200") {
                         error("Smoke test failed! Status code: ${statusCode}")
